@@ -82,75 +82,133 @@ def get_all_posts():
 
 
 # ─── Signal Parser ──────────────────────────────────────
+def _extract_symbol(text_upper):
+    """Extract trading pair symbol from text (many formats). Returns e.g. 'BTC/USDT' or None."""
+    # Words to ignore (false positives)
+    SKIP = {'LEVERAGE', 'STRATEGY', 'TARGET', 'SIGNAL', 'AVERAGE', 'ABOVE',
+            'BELOW', 'SHORT', 'LONG', 'POINT', 'FIRST', 'SECOND', 'THIRD',
+            'FOURTH', 'FIFTH', 'TRADE', 'PRICE', 'MARKET', 'ORDER', 'CLOSE',
+            'OPEN', 'BREAK', 'LEVEL', 'AREA', 'ZONE', 'SETUP', 'TIME',
+            'CHART', 'PATTERN', 'INDICATOR', 'CONFIRM', 'REJECT', 'HOLD',
+            'SCALP', 'SWING', 'DAILY', 'WEEKLY', 'ALERT', 'UPDATE',
+            'RESULT', 'PROFIT', 'LOSS', 'RISK', 'REWARD', 'EXCHANGE'}
+
+    # 1) BTC/USDT, ETH/USDT, ETH/BTC
+    m = re.search(r'\b([A-Z]{2,12})/(USDT|BUSD|USDC|BTC|ETH)\b', text_upper)
+    if m and m.group(1) not in SKIP:
+        return m.group(0)
+
+    # 2) #BTCUSDT, #ETHUSDT
+    m = re.search(r'#([A-Z]{3,12})(USDT|BUSD|USDC)\b', text_upper)
+    if m and m.group(1) not in SKIP:
+        return f"{m.group(1)}/{m.group(2)}"
+
+    # 3) BTCUSDT, SOLUSDT (bare, after space/start/emoji)
+    m = re.search(r'(?:^|[\s#])' + r'([A-Z]{2,12})(USDT|BUSD|USDC)\b', text_upper)
+    if m and m.group(1) not in SKIP:
+        return f"{m.group(1)}/{m.group(2)}"
+
+    return None
+
+
+def _extract_entry(text):
+    """Extract entry price from text (many formats)."""
+    patterns = [
+        r'[Ee]ntry\s*(?:Price|Zone|Level|Target|Point)?\s*[:\-=]?\s*([\d,]+\.?\d*)',
+        r'[Bb]uy\s*(?:Zone|Price|Level|Area)?\s*[:\-=]?\s*([\d,]+\.?\d*)',
+        r'[Ss]ell\s*(?:Zone|Price|Level|Area)?\s*[:\-=]?\s*([\d,]+\.?\d*)',
+        r'(?:Open|Entry)\s*@\s*([\d,]+\.?\d*)',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            return float(m.group(1).replace(',', ''))
+    return None
+
+
+def _extract_tps(text):
+    """Extract TP levels (supports many label formats)."""
+    tps = {}
+    # Label patterns to try (in order)
+    label_pats = [
+        lambda i: rf'[Tt]arget\s*{i}\s*[:\-=]?',           # Target 1:
+        lambda i: rf'[Tt]ake\s*[Pp]rofit\s*{i}\s*[:\-=]?', # Take Profit 1:
+        lambda i: rf'TP\s*{i}\s*[:\-=]?',                   # TP1: / TP 1:
+        lambda i: rf'\bT{i}\s*[:\-=]?',                      # T1:
+    ]
+    for i in range(1, 6):
+        for make_pat in label_pats:
+            m = re.search(make_pat(i), text)
+            if m:
+                after = text[m.end():]
+                num = re.search(r'([\d,]+\.?\d*)', after)
+                if num:
+                    tps[f'tp{i}'] = float(num.group(1).replace(',', ''))
+                    break
+    return tps
+
+
+def _extract_sl(text):
+    """Extract stop loss price (many formats)."""
+    m = re.search(
+        r'(?:SL|Stop\s*-?\s*Loss|Stop|Risk)\s*[:\-=]?\s*([\d,]+\.?\d*)',
+        text, re.IGNORECASE
+    )
+    if m:
+        return float(m.group(1).replace(',', ''))
+    return None
+
+
 def parse_signal(text):
     """
-    Parse a signal message and extract:
-      - direction (LONG/BUY or SHORT/SELL)
-      - symbol (e.g. BTC/USDT or #BTCUSDT)
-      - entry price
-      - TP1-TP4 (optional)
-      - SL (stop loss)
+    Universal signal parser — supports many formats from different channels.
 
-    Supports multiple formats:
-      Format 1:  LONG BTC/USDT | Entry: 65000 | TP1: 66000 | SL: 63000
-      Format 2:  #STRKUSDT | Long Entry Zone: 0.03008 | Target 1: 0.03036 | Stop-Loss: 0.02862
+    Extracts: direction, symbol, entry, TP1-TP5, SL
+
+    Supported formats:
+      LONG BTC/USDT          | Entry: 65000    | TP1: 66000       | SL: 63000
+      #STRKUSDT              | Entry Zone: ... | Target 1: ...    | Stop-Loss: ...
+      Buy ETHUSDT @ 3500     | TP: 3600/3800   | Stop: 3400
+      SHORT XRP/USDT         | Entry - 0.62    | Take Profit: ... | SL - 0.58
+      🔵 LONG BTCUSDT        | Buy Zone: ...   | T1: ... T2: ...  | Risk: ...
     """
-    data = {}
     text_upper = text.upper()
 
     # ── Direction ──
-    if 'LONG' in text_upper or 'BUY' in text_upper:
-        data['direction'] = 'LONG'
-    elif 'SHORT' in text_upper or 'SELL' in text_upper:
-        data['direction'] = 'SHORT'
+    if re.search(r'\bLONG\b|\bBUY\b', text_upper):
+        direction = 'LONG'
+    elif re.search(r'\bSHORT\b|\bSELL\b', text_upper):
+        direction = 'SHORT'
     else:
         return None
 
     # ── Symbol ──
-    # Try format 1: BTC/USDT, ETH/USDT, etc.
-    symbol_match = re.search(r'([A-Z]{2,12}/(?:USDT|BUSD|USDC))', text_upper)
-    if symbol_match:
-        data['symbol'] = symbol_match.group(1)
-    else:
-        # Try format 2: #BTCUSDT, #STRKUSDT, etc.
-        hash_match = re.search(r'#([A-Z]{3,12})(USDT|BUSD|USDC)\b', text_upper)
-        if hash_match:
-            data['symbol'] = f"{hash_match.group(1)}/{hash_match.group(2)}"
-        else:
-            return None
-
-    # ── Entry Price ──
-    entry_match = re.search(r'[Ee]ntry\s*(?:Zone)?\s*[:\-]?\s*([\d,]+\.?\d*)', text)
-    if entry_match:
-        data['entry'] = float(entry_match.group(1).replace(',', ''))
-    else:
+    symbol = _extract_symbol(text_upper)
+    if not symbol:
         return None
 
-    # ── TP levels ──
-    # Support: "TP1:", "TP 1:", "Target 1:", "Target1:", "🎯 1:"
-    for i in range(1, 5):
-        key = f'tp{i}'
-        # Try "Target N" first (format 2)
-        tp = re.search(rf'Target\s*{i}\s*[:\-]?\s*([\d,]+\.?\d*)', text, re.IGNORECASE)
-        if not tp:
-            # Try "TP N" (format 1)
-            tp = re.search(rf'TP\s*{i}\s*[:\-]?\s*([\d,]+\.?\d*)', text, re.IGNORECASE)
-        if tp:
-            data[key] = float(tp.group(1).replace(',', ''))
+    # ── Entry ──
+    entry = _extract_entry(text)
+    if entry is None:
+        return None
+
+    # ── TPs ──
+    tps = _extract_tps(text)
 
     # ── SL ──
-    # Support: "SL:", "Stop-Loss:", "Stop Loss:", "🔺 Stop-Loss:"
-    sl = re.search(
-        r'(?:SL|Stop\s*-?\s*Loss)\s*[:\-]?\s*([\d,]+\.?\d*)',
-        text, re.IGNORECASE
-    )
-    if sl:
-        data['sl'] = float(sl.group(1).replace(',', ''))
+    sl = _extract_sl(text)
 
     # Must have at least one TP and SL
-    has_tp = any(f'tp{i}' in data for i in range(1, 5))
-    has_sl = 'sl' in data
-    return data if has_tp and has_sl else None
+    if not tps or sl is None:
+        return None
+
+    return {
+        'direction': direction,
+        'symbol': symbol,
+        'entry': entry,
+        **tps,
+        'sl': sl,
+    }
 
 
 # ─── Price Fetcher ──────────────────────────────────────
@@ -191,7 +249,7 @@ def check_signals(active_signals):
 
         # Collect all TP levels
         tps = []
-        for i in range(1, 5):
+        for i in range(1, 6):
             key = f'tp{i}'
             if key in sig:
                 tps.append((f'TP{i}', sig[key]))
@@ -216,7 +274,7 @@ def check_signals(active_signals):
                 else:
                     pnl = ((entry - tp_price) / entry) * 100
 
-                emoji = {"TP1": "🟩", "TP2": "🟦", "TP3": "🟪", "TP4": "🟧"}.get(tp_name, "✅")
+                emoji = {"TP1": "🟩", "TP2": "🟦", "TP3": "🟪", "TP4": "🟧", "TP5": "⬜"}.get(tp_name, "✅")
                 msg = (
                     f"{emoji} <b>{tp_name} HIT!</b>\n\n"
                     f"📊 <code>{symbol}</code> | {direction}\n"
@@ -325,7 +383,7 @@ def main():
         )
         if 'sl' in parsed:
             confirm += f"\n🛑 SL: <code>{parsed['sl']}</code>"
-        for i in range(1, 5):
+        for i in range(1, 6):
             tp_key = f'tp{i}'
             if tp_key in parsed:
                 confirm += f"\n🎯 TP{i}: <code>{parsed[tp_key]}</code>"
