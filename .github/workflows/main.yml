@@ -2,7 +2,7 @@ name: Signal Tracker Bot
 
 on:
   schedule:
-    - cron: '*/2 * * * *'  # Every 2 minutes
+    - cron: '*/2 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -17,9 +17,8 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -r signal_tracker/requirements.txt
+        run: pip install ccxt requests
 
-      # Restore latest signals data (dynamic key = always saves after run)
       - name: Restore active signals
         uses: actions/cache@v3
         with:
@@ -27,7 +26,6 @@ jobs:
           key: signals-${{ github.run_id }}
           restore-keys: signals-
 
-      # Only TRACKER_TOKEN needed — bot works in ANY channel it's added to
       - name: Run tracker
         env:
           TRACKER_TOKEN: ${{ secrets.TRACKER_TOKEN }}
