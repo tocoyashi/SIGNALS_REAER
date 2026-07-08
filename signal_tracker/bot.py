@@ -91,7 +91,9 @@ def _extract_symbol(text_upper):
             'OPEN', 'BREAK', 'LEVEL', 'AREA', 'ZONE', 'SETUP', 'TIME',
             'CHART', 'PATTERN', 'INDICATOR', 'CONFIRM', 'REJECT', 'HOLD',
             'SCALP', 'SWING', 'DAILY', 'WEEKLY', 'ALERT', 'UPDATE',
-            'RESULT', 'PROFIT', 'LOSS', 'RISK', 'REWARD', 'EXCHANGE'}
+            'RESULT', 'PROFIT', 'LOSS', 'RISK', 'REWARD', 'EXCHANGE',
+            'COIN', 'AUTOMATED', 'TYPE', 'TRACKING', 'SIGNALS', 'STRENGTH',
+            'ASSET', 'EXCHANGES', 'ISOLATED', 'CROSS', 'PAIRS', 'BINGX'}
 
     # 1) BTC/USDT, ETH/USDT, USD1/USDT, 1INCH/USDT
     m = re.search(r'\b([A-Z0-9]{2,12})/(USDT|BUSD|USDC|BTC|ETH)\b', text_upper)
@@ -131,7 +133,7 @@ def _extract_entry(text):
         r'entry\s*(?:price|zone|level|target|point)?\s*[:\-=]?\s*',
         r'buy\s*(?:zone|price|level|area)?\s*[:\-=]?\s*',
         r'sell\s*(?:zone|price|level|area)?\s*[:\-=]?\s*',
-        r'(?:open|entry)\s*@\s*',
+        r'(?:open|entry)\s*[@=]\s*',
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
@@ -149,7 +151,7 @@ def _extract_tps(text):
     # ── Method 1: Labeled targets (Target 1:, TP1:, Take Profit 1:, T1:) ──
     label_pats = [
         lambda i: rf'target\s*{i}\s*[:\-=]?',
-        lambda i: rf'take\s*profit\s*{i}\s*[:\-=]?',
+        lambda i: rf'take[ \t]*profit[ \t]*{i}\s*[:\-=]?',  # no newline between profit and number
         lambda i: rf'tp\s*{i}\s*[:\-=]?',
         lambda i: rf'\bT{i}\s*[:\-=]?',
     ]
@@ -174,13 +176,33 @@ def _extract_tps(text):
             for idx, p in enumerate(prices, 1):
                 tps[f'tp{idx}'] = float(p.replace(',', ''))
 
+    # ── Method 3: Numbered list after label (1) val\n2) val) ──
+    if not tps:
+        m = re.search(r'(?:targets?|take\s*profit|tps?)\s*[:\-=]?\s*[:\s]*\n?', text, re.IGNORECASE)
+        if m:
+            after = text[m.end():]
+            nums = re.findall(r'(?:^|\n)\s*\d+\s*[:)\-\.]\s*([\d,]+\.\d+)', after)
+            for idx, p in enumerate(nums, 1):
+                tps[f'tp{idx}'] = float(p.replace(',', ''))
+
+    # ── Method 4: Bracket comma-separated [ 0.0745, 0.0753, 0.0763 ] ──
+    if not tps:
+        m = re.search(
+            r'(?:take\s*profit|targets?|tps?)\s*[:\-=]?\s*\[\s*([\d,]+\.\d+(?:\s*,\s*[\d,]+\.\d+)*)\s*\]',
+            text, re.IGNORECASE
+        )
+        if m:
+            prices = re.findall(r'([\d,]+\.\d+)', m.group(1))
+            for idx, p in enumerate(prices, 1):
+                tps[f'tp{idx}'] = float(p.replace(',', ''))
+
     return tps
 
 
 def _extract_sl(text):
     """Extract stop loss (many formats, case-insensitive)."""
     patterns = [
-        r'(?:stop\s*-?\s*loss|SL|stop|risk)\s*[:\-=]?\s*',
+        r'(?:stop\s*-?\s*loss|stoploss|SL|stop|risk)\s*[:\-=]?\s*',
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
