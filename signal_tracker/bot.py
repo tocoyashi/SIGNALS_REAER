@@ -280,6 +280,29 @@ def check_signals(active_signals):
                 tps.append((f'TP{i}', sig[key]))
 
         hit_tps = sig.get('hit_tps', [])
+        entry_hit = sig.get('entry_hit', False)
+
+        # ── Check Entry Price (one-time alert) ──
+        if not entry_hit:
+            entry_triggered = False
+            if direction == 'LONG' and price >= entry:
+                entry_triggered = True
+            elif direction == 'SHORT' and price <= entry:
+                entry_triggered = True
+
+            if entry_triggered:
+                sig['entry_hit'] = True
+                msg = (
+                    f"⚡ <b>ENTRY REACHED!</b>\n\n"
+                    f"📊 <code>{symbol}</code> | {direction}\n"
+                    f"💰 Entry: <code>{entry}</code>\n"
+                    f"💵 Current: <code>{price}</code>\n"
+                    f"⏰ {datetime.now().strftime('%H:%M:%S')}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔍 Now monitoring TP/SL..."
+                )
+                send_message(chat_id, msg, reply_to_id=sig['message_id'])
+                print(f"  ⚡ {symbol} ENTRY REACHED at {entry} (channel {chat_id})")
 
         # Check each TP
         for tp_name, tp_price in tps:
