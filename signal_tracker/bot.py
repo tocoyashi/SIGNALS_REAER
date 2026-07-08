@@ -93,7 +93,12 @@ def _extract_symbol(text_upper):
             'SCALP', 'SWING', 'DAILY', 'WEEKLY', 'ALERT', 'UPDATE',
             'RESULT', 'PROFIT', 'LOSS', 'RISK', 'REWARD', 'EXCHANGE',
             'COIN', 'AUTOMATED', 'TYPE', 'TRACKING', 'SIGNALS', 'STRENGTH',
-            'ASSET', 'EXCHANGES', 'ISOLATED', 'CROSS', 'PAIRS', 'BINGX'}
+            'ASSET', 'EXCHANGES', 'ISOLATED', 'CROSS', 'BINGX'}
+
+    # 0) Pairs: ENA/USDT, Pairs: BTCUSDT
+    m = re.search(r'pairs\s*[:\-=]?\s*([A-Z0-9]{2,12})/?(USDT|BUSD|USDC|BTC|ETH)\b', text_upper)
+    if m and m.group(1) not in SKIP:
+        return f"{m.group(1)}/{m.group(2)}"
 
     # 1) BTC/USDT, ETH/USDT, USD1/USDT, 1INCH/USDT
     m = re.search(r'\b([A-Z0-9]{2,12})/(USDT|BUSD|USDC|BTC|ETH)\b', text_upper)
@@ -129,6 +134,14 @@ def _first_price(text, start=0):
 
 def _extract_entry(text):
     """Extract entry price (case-insensitive, many formats)."""
+    # ── Bracket format: Entry = [ 0.0733 TO 0.0731 ] ──
+    bracket_m = re.search(
+        r'entry\s*(?:price|zone|level)?\s*[:\-=]?\s*\[\s*([\d,]+\.\d+)\s*(?:TO|to|—|-|~)\s*([\d,]+\.\d+)\s*\]',
+        text, re.IGNORECASE
+    )
+    if bracket_m:
+        return float(bracket_m.group(1).replace(',', ''))
+
     patterns = [
         r'entry\s*(?:price|zone|level|target|point)?\s*[:\-=]?\s*',
         r'buy\s*(?:zone|price|level|area)?\s*[:\-=]?\s*',
@@ -138,7 +151,16 @@ def _extract_entry(text):
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            price = _first_price(text, m.end())
+            after = text[m.end():]
+            # Skip parenthetical like (TP1) or (limit)
+            skip = re.match(r'\s*\([^)]*\)\s*', after)
+            start = skip.end() if skip else 0
+            after = after[start:]
+            # Numbered list: 1) 16.80 2) 16.29
+            num_m = re.match(r'(?:\d+\s*[:)\-\.]\s*)+([\d,]+\.\d+)', after)
+            if num_m:
+                return float(num_m.group(1).replace(',', ''))
+            price = _first_price(after)
             if price is not None:
                 return price
     return None
@@ -151,7 +173,7 @@ def _extract_tps(text):
     # ── Method 1: Labeled targets (Target 1:, TP1:, Take Profit 1:, T1:) ──
     label_pats = [
         lambda i: rf'target\s*{i}\s*[:\-=]?',
-        lambda i: rf'take[ \t]*profit[ \t]*{i}\s*[:\-=]?',  # no newline between profit and number
+        lambda i: rf'take[ \t]*profit[ \t]*{i}\s*[:\-=]?',
         lambda i: rf'tp\s*{i}\s*[:\-=]?',
         lambda i: rf'\bT{i}\s*[:\-=]?',
     ]
@@ -172,23 +194,27 @@ def _extract_tps(text):
     if not tps:
         m = re.search(r'targets?\s*[:\-=]?\s*([\d,]+\.?\d*(?:\s*[-–—]\s*[\d,]+\.?\d*)+)', text, re.IGNORECASE)
         if m:
-            prices = re.findall(r'([\d,]+\.\d+)', m.group(1))
+            prices = re.findall(r'([\d,]+(?:\.\d+)?)', m.group(1))
             for idx, p in enumerate(prices, 1):
                 tps[f'tp{idx}'] = float(p.replace(',', ''))
 
     # ── Method 3: Numbered list after label (1) val\n2) val) ──
+    # Handles: Targets: 1) 16.89 2) 17.24  and  Take Profit ☄\n1) 42.79
     if not tps:
-        m = re.search(r'(?:targets?|take\s*profit|tps?)\s*[:\-=]?\s*[:\s]*\n?', text, re.IGNORECASE)
+        m = re.search(r'(?:targets?|take\s*profit|tps?)\b', text, re.IGNORECASE)
         if m:
             after = text[m.end():]
-            nums = re.findall(r'(?:^|\n)\s*\d+\s*[:)\-\.]\s*([\d,]+\.\d+)', after)
+            # Skip non-numeric junk (emojis, symbols, spaces, colons) until numbers
+            skip = re.match(r'[^0-9]*', after)
+            start = skip.end() if skip else 0
+            nums = re.findall(r'\d+\s*[:)\-]\s*([\d,]+(?:\.\d+)?)', after[start:])
             for idx, p in enumerate(nums, 1):
                 tps[f'tp{idx}'] = float(p.replace(',', ''))
 
     # ── Method 4: Bracket comma-separated [ 0.0745, 0.0753, 0.0763 ] ──
     if not tps:
         m = re.search(
-            r'(?:take\s*profit|targets?|tps?)\s*[:\-=]?\s*\[\s*([\d,]+\.\d+(?:\s*,\s*[\d,]+\.\d+)*)\s*\]',
+            r'(?:take\s*profit|targets?|tps?)\b[^\[]*?\[\s*([\d,]+\.\d+(?:\s*,\s*[\d,]+\.\d+)*)\s*\]',
             text, re.IGNORECASE
         )
         if m:
@@ -202,12 +228,16 @@ def _extract_tps(text):
 def _extract_sl(text):
     """Extract stop loss (many formats, case-insensitive)."""
     patterns = [
-        r'(?:stop\s*-?\s*loss|stoploss|SL|stop|risk)\s*[:\-=]?\s*',
+        r'(?:stop\s*-?\s*loss|stoploss|\bSL\b|\bstop\b|\brisk\b)\s*[:\-=]?\s*',
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            price = _first_price(text, m.end())
+            after = text[m.end():]
+            # Skip emojis/symbols like ⛔️
+            skip = re.match(r'[^0-9]*', after)
+            start = skip.end() if skip else 0
+            price = _first_price(after, start)
             if price is not None:
                 return price
     return None
@@ -443,6 +473,9 @@ def main():
         active[key] = parsed
         new_count += 1
 
+        # ─── Fetch current price for the reply ───
+        current_price = get_current_price(parsed['symbol'])
+
         # ─── REPLAY: Reply to the original signal in the SAME channel ───
         d = "🟢" if parsed['direction'] == 'LONG' else "🔴"
         confirm = (
@@ -451,6 +484,8 @@ def main():
             f"📊 <code>{parsed['symbol']}</code> | <b>{parsed['direction']}</b>\n"
             f"💰 Entry: <code>{parsed['entry']}</code>"
         )
+        if current_price is not None:
+            confirm += f"\n💵 Current: <code>{current_price}</code>"
         if 'sl' in parsed:
             confirm += f"\n🛑 SL: <code>{parsed['sl']}</code>"
         for i in range(1, 11):
