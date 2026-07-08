@@ -1,0 +1,34 @@
+name: Signal Tracker Bot
+
+on:
+  schedule:
+    - cron: '*/2 * * * *'  # Every 2 minutes
+  workflow_dispatch:
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r signal_tracker/requirements.txt
+
+      # Restore latest signals data (dynamic key = always saves after run)
+      - name: Restore active signals
+        uses: actions/cache@v3
+        with:
+          path: active_signals.json
+          key: signals-${{ github.run_id }}
+          restore-keys: signals-
+
+      # Only TRACKER_TOKEN needed — bot works in ANY channel it's added to
+      - name: Run tracker
+        env:
+          TRACKER_TOKEN: ${{ secrets.TRACKER_TOKEN }}
+        run: python signal_tracker/bot.py
