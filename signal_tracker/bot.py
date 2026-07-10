@@ -243,11 +243,25 @@ def _extract_sl(text):
     return None
 
 
+def _extract_leverage(text):
+    """Extract leverage multiplier from signal text (e.g., '20x', 'Leverage: 10x')."""
+    m = re.search(r'(?:leverage|lev|x)\s*[:\-=]?\s*(\d+)\s*[xX]?', text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    # Standalone: "20x" at word boundary
+    m = re.search(r'\b(\d+)\s*x\b', text, re.IGNORECASE)
+    if m:
+        val = int(m.group(1))
+        if 2 <= val <= 200:  # reasonable leverage range
+            return val
+    return None
+
+
 def parse_signal(text):
     """
     Universal signal parser — supports many formats from different channels.
 
-    Extracts: direction, symbol, entry, TP1-TP10, SL
+    Extracts: direction, symbol, entry, TP1-TP10, SL, leverage
     """
     text_upper = text.upper()
 
@@ -279,13 +293,20 @@ def parse_signal(text):
     if not tps or sl is None:
         return None
 
-    return {
+    # ── Leverage (optional) ──
+    leverage = _extract_leverage(text)
+
+    result = {
         'direction': direction,
         'symbol': symbol,
         'entry': entry,
         **tps,
         'sl': sl,
     }
+    if leverage:
+        result['leverage'] = leverage
+
+    return result
 
 
 # ─── Price Fetcher ──────────────────────────────────────
@@ -332,29 +353,7 @@ def check_signals(active_signals):
                 tps.append((f'TP{i}', sig[key]))
 
         hit_tps = sig.get('hit_tps', [])
-        entry_hit = sig.get('entry_hit', False)
-
-        # ── Check Entry Price (one-time alert) ──
-        if not entry_hit:
-            entry_triggered = False
-            if direction == 'LONG' and price >= entry:
-                entry_triggered = True
-            elif direction == 'SHORT' and price <= entry:
-                entry_triggered = True
-
-            if entry_triggered:
-                sig['entry_hit'] = True
-                msg = (
-                    f"⚡ <b>ENTRY REACHED!</b>\n\n"
-                    f"📊 <code>{symbol}</code> | {direction}\n"
-                    f"💰 Entry: <code>{entry}</code>\n"
-                    f"💵 Current: <code>{price}</code>\n"
-                    f"⏰ {datetime.now().strftime('%H:%M:%S')}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🔍 Now monitoring TP/SL..."
-                )
-                send_message(chat_id, msg, reply_to_id=sig['message_id'])
-                print(f"  ⚡ {symbol} ENTRY REACHED at {entry} (channel {chat_id})")
+        leverage = sig.get('leverage')
 
         # Check each TP
         for tp_name, tp_price in tps:
@@ -373,6 +372,9 @@ def check_signals(active_signals):
                     pnl = ((tp_price - entry) / entry) * 100
                 else:
                     pnl = ((entry - tp_price) / entry) * 100
+                real_pnl = pnl * leverage if leverage else pnl
+
+                lev_line = f"\n⚡ Leverage: <code>{leverage}x</code>\n💰 Real PnL: <code>+{real_pnl:.2f}%</code>" if leverage else ""
 
                 emoji = {"TP1": "🟩", "TP2": "🟦", "TP3": "🟪", "TP4": "🟧", "TP5": "⬜"}.get(tp_name, "✅")
                 msg = (
@@ -380,7 +382,8 @@ def check_signals(active_signals):
                     f"📊 <code>{symbol}</code> | {direction}\n"
                     f"🎯 {tp_name}: <code>{tp_price}</code>\n"
                     f"💵 Current: <code>{price}</code>\n"
-                    f"📈 PnL: <code>+{pnl:.2f}%</code>\n"
+                    f"📈 PnL: <code>+{pnl:.2f}%</code>"
+                    f"{lev_line}\n"
                     f"⏰ {datetime.now().strftime('%H:%M:%S')}"
                 )
                 send_message(chat_id, msg, reply_to_id=sig['message_id'])
@@ -402,13 +405,17 @@ def check_signals(active_signals):
                     pnl = ((sl - entry) / entry) * 100
                 else:
                     pnl = ((entry - sl) / entry) * 100
+                real_pnl = pnl * leverage if leverage else pnl
+
+                lev_line = f"\n⚡ Leverage: <code>{leverage}x</code>\n💰 Real PnL: <code>{real_pnl:.2f}%</code>" if leverage else ""
 
                 msg = (
                     f"🛑 <b>STOP LOSS HIT!</b>\n\n"
                     f"📊 <code>{symbol}</code> | {direction}\n"
                     f"🛑 SL: <code>{sl}</code>\n"
                     f"💵 Current: <code>{price}</code>\n"
-                    f"📉 PnL: <code>{pnl:.2f}%</code>\n"
+                    f"📉 PnL: <code>{pnl:.2f}%</code>"
+                    f"{lev_line}\n"
                     f"⏰ {datetime.now().strftime('%H:%M:%S')}"
                 )
                 send_message(chat_id, msg, reply_to_id=sig['message_id'])
@@ -472,29 +479,6 @@ def main():
         parsed['channel_title'] = chat_title
         active[key] = parsed
         new_count += 1
-
-        # ─── Fetch current price for the reply ───
-        current_price = get_current_price(parsed['symbol'])
-
-        # ─── REPLAY: Reply to the original signal in the SAME channel ───
-        d = "🟢" if parsed['direction'] == 'LONG' else "🔴"
-        confirm = (
-            f"👁 <b>Tracking Signal #{msg_id}</b> {d}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 <code>{parsed['symbol']}</code> | <b>{parsed['direction']}</b>\n"
-            f"💰 Entry: <code>{parsed['entry']}</code>"
-        )
-        if current_price is not None:
-            confirm += f"\n💵 Current: <code>{current_price}</code>"
-        if 'sl' in parsed:
-            confirm += f"\n🛑 SL: <code>{parsed['sl']}</code>"
-        for i in range(1, 11):
-            tp_key = f'tp{i}'
-            if tp_key in parsed:
-                confirm += f"\n🎯 TP{i}: <code>{parsed[tp_key]}</code>"
-        confirm += f"\n━━━━━━━━━━━━━━━━━━━━\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-        send_message(chat_id, confirm, reply_to_id=msg_id)
         print(f"  ✅ Tracking: {parsed['symbol']} {parsed['direction']} in [{chat_title}] (#{msg_id})")
 
     if new_count:
